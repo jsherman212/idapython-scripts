@@ -339,14 +339,7 @@ def main():
                             if argnum == 0:
                                 fxn_args += "{} *__hidden this, ".format(class_name)
                             else:
-                                # raw_type = get_raw_type(arg_type)
-
-                                # if should_fwd_decl(raw_type):
-                                #     fwd_decls.add(fix_type(raw_type))
-
-                                # fxn_args += "{} a{}, ".format(fix_type(arg_type), argnum)
                                 fxn_args += "{}, ".format(fix_type(arg_type))
-                                # fxn_args += "__int64 a{}, ".format(argnum)
 
                             argnum += 1
 
@@ -365,11 +358,6 @@ def main():
                             fwd_decls.update(to_fwd_decl)
 
                         if arg_type != "void" and len(arg_type) > 0:
-                            # raw_arg_type = get_raw_type(arg_type)
-                            # if should_fwd_decl(raw_arg_type):
-                            #     fwd_decls.add(fix_type(raw_arg_type))
-
-                            # fxn_args = "{} *__hidden this, __int64 a1".format(class_name)
                             fxn_args += ", {}".format(fix_type(arg_type))
                 else:
                     all_except_args = fxn_type[:fxn_type.find("(")]
@@ -406,42 +394,18 @@ def main():
                 else:
                     fxn_name_dict[fxn_name] = -1
 
-
-                # if fxn_name in fxn_name_list:
-                #     fxn_name += "2"
-                    # print("Duplicate")
-                    # exit(0)
-
-                # fxn_name_list.append(fxn_name)
-
                 if "DTOR" in fxn_name:
                     num_dtors += 1
 
-                #print(get_type(fxn_ea).find("("))
-                # print("Function return type: {}".format(fxn_return_type))
-                # print("Function calling conv: {}".format(fxn_call_conv))
-                # print("Function name: {}".format(fxn_name))
-                # print("Function args: {}".format(fxn_args))
-
             if fxn_name == "___cxa_pure_virtual":
-                # struct_file.write("\tvoid __noreturn (__cdecl *___cxa_pure_virtual{})({});\n".format(num_virts, fxn_args))
                 struct_fields.append("\tvoid __noreturn (__cdecl *___cxa_pure_virtual{})({});".format(num_virts,
                     fxn_args))
                 num_virts += 1
             else:
-                # struct_file.write("\t{} ({} *{})({});\n".format(fxn_return_type, fxn_call_conv, fxn_name, fxn_args))
                 struct_fields.append("\t{} ({} *{})({});".format(fxn_return_type,
                     fxn_call_conv, fxn_name, fxn_args))
 
-            # print()
-
-            # if ea == 0xfffffff0079dcb50:
-            #     struct_file.close()
-            #     exit(0)
-
-            # print("\t{}: {}".format(hex(ea), fxn_name))
             ea += 8
-
 
         for decl in fwd_decls:
             struct_file.write("struct {};\n".format(decl))
@@ -456,12 +420,22 @@ def main():
             struct_file.write("\t{}\n".format(field));
 
         struct_file.write("};\n\n")
-        struct_file.write("struct {}_fields {{\n".format(class_name))
+        
+        if "::" in class_name:
+            struct_file.write("struct {}::fields {{\n".format(class_name))
+        else:
+            struct_file.write("struct {}_fields {{\n".format(class_name))
+
         struct_file.write("\tuint8_t pad[0x3000];\n")
         struct_file.write("};\n\n")
         struct_file.write("struct {} {{\n".format(class_name))
         struct_file.write("\tstruct {}_sym_vtable *vt;\n".format(class_name))
-        struct_file.write("\tstruct {}_fields f0;\n".format(class_name))
+
+        if "::" in class_name:
+            struct_file.write("\tstruct fields f0;\n")
+        else:
+            struct_file.write("\tstruct {}_fields f0;\n".format(class_name))
+
         struct_file.write("};\n\n")
 
         cnt += 1
