@@ -85,7 +85,7 @@ def get_raw_type(type_str):
     return raw_type 
 
 def should_fwd_decl(raw_type_str):
-    return is_primitive_type(raw_type_str) == False and len(raw_type_str) > 0
+    return is_primitive_type(raw_type_str) == False and len(raw_type_str) > 0 and raw_type_str != "..."
 
 def fix_type(type):
     # C++ templates
@@ -168,12 +168,18 @@ def get_fwd_decls(arg_type_list):
 
 # really weird corner cases which I don't feel like dealing with
 # and can be excluded without degrading the quality of the database
+# ios 13 beta kernel & ios 14 beta 4 research kernel blacklist
 BLACKLIST = ["SimpleEval", "IOAVService::DisplayIDParser::readDisplayID",
         "IOAVService::DisplayIDParser::parseDisplayID",
         "IOMFB::TypedProp",
         "UPPipe_H10P_Trampoline::ActiveCallback",
         "UPPipe_H10P_Trampoline::EventCallback",
-        "IOMFB::LateralLeakageHandler::CurveEvaluator"]
+        "IOMFB::LateralLeakageHandler::CurveEvaluator", "AppleBCMWLANParseRing",
+        "UPPipe_H11P_Trampoline::EventCallback",
+        "scaled_twopfour_degamma", "scaled_sRGB_degamma", "VideoInterfaceStub",
+        "VideoInterface", "VideoInterfaceIOAV", "VideoInterfaceMipi",
+        "CurveType0", "CurveType2", "CurveType4", "FnCurve", "LUTSampler",
+        "NullWrap", "CurveConvolver", "SysGamma", "HDRGammaFunc"]
 
 def main():
     all_names = list(idautils.Names())
@@ -234,14 +240,11 @@ def main():
         #     continue
         # if class_name != "IOAVController":
         #     continue
+        # if class_name != "AppleConvergedIPCICEBBBTIInterface":
+        #     continue
 
-        #make_vtable_struct(struct_file, vtable, class_name)
 
         cnt += 1
-
-        # if cnt == 5:
-        #     break
-
 
         # print("{}".format(class_name))
 
@@ -317,11 +320,15 @@ def main():
 
                     # if fxn_args_string == "OSObject *, void (*)(OSObject *, IOHDCPAuthSession *), IOHDCPMessageTransport *, IOHDCPInterface *":
                     #     fxn_args_string = "OSObject *, void (*)(OSObject *, IOHDCPAuthSession *), IOHDCPMessageTransport *, IOHDCPInterface *, unsigned long long"
+                    
+                    fxn_args_string = fxn_args_string.replace("{block_pointer}", "*")
 
                     if fxn_args_string.find(",") != -1:
                         # print("More than one arg: {}".format(fxn_args_list))
+
                         # extra comma makes the parser happy
                         fxn_args_types_list = get_arg_type_list(fxn_args_string + ",")
+
                         
                         # print("More than one arg for {}: {}".format(fxn_name, fxn_args_types_list))
                         # print()
@@ -432,9 +439,9 @@ def main():
         struct_file.write("\tstruct {}_sym_vtable *vt;\n".format(class_name))
 
         if "::" in class_name:
-            struct_file.write("\tstruct fields f0;\n")
+            struct_file.write("\tstruct fields f;\n")
         else:
-            struct_file.write("\tstruct {}_fields f0;\n".format(class_name))
+            struct_file.write("\tstruct {}_fields f;\n".format(class_name))
 
         struct_file.write("};\n\n")
 
