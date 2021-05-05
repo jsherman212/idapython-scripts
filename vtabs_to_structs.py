@@ -168,7 +168,7 @@ def get_fwd_decls(arg_type_list):
 
 # really weird corner cases which I don't feel like dealing with
 # and can be excluded without degrading the quality of the database
-# ios 13 beta kernel & ios 14 beta 4 research kernel blacklist
+# ios 12 beta kernel & ios 14 beta 4 research kernel blacklist
 BLACKLIST = ["SimpleEval", "IOAVService::DisplayIDParser::readDisplayID",
         "IOAVService::DisplayIDParser::parseDisplayID",
         "IOMFB::TypedProp",
