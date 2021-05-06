@@ -4,7 +4,9 @@
 from idaapi import *
 import idaapi
 import idautils
+import ida_funcs
 import ida_kernwin
+import ida_name
 import idc
 
 import os
@@ -56,6 +58,21 @@ class ChooseWindow(Choose):
 
         fxnid = 0;
 
+        fp.write("static const char *%s_fxn_names[] = {\n" % filename)
+
+        for fxnaddr in fxns:
+            fxnname = ida_funcs.get_func_name(fxnaddr)
+            fxnname_dm = idc.demangle_name(fxnname, get_inf_attr(idc.INF_LONG_DN))
+
+            if fxnname_dm != None:
+                fxnname = fxnname_dm
+
+            fp.write("\"%s\",\n" % fxnname)
+
+        fp.write("};\n")
+
+        fxnid = 0;
+
         fp.write("static void %s(void){\n" % filename)
 
         for fxnaddr in fxns:
@@ -64,6 +81,20 @@ class ChooseWindow(Choose):
             fxnaddrh = hex(fxnaddr)
             # print("Current function {} with ID {}, brk {}".format(fxnaddrh, fxnid, hex(brk)))
             fp.write("kwrite_instr({}+kernel_slide, {}); /* FUNCTION {} */\n".format(fxnaddrh, hex(brk), hex(fxnid)))
+            fxnid += 1
+
+        fp.write("}\n")
+
+        fxnid = 0
+
+        fp.write("static void %s(void){\n" % filename.replace("massbp", "undobp"))
+
+        for fxnaddr in fxns:
+            brk &= 0xffe0001f
+            brk |= (fxnid << 5)
+            fxnaddrh = hex(fxnaddr)
+            # print("Current function {} with ID {}, brk {}".format(fxnaddrh, fxnid, hex(brk)))
+            fp.write("kwrite_instr({}+kernel_slide, {}_orig_instrs[{}]);\n".format(fxnaddrh, filename, hex(fxnid)))
             fxnid += 1
 
         fp.write("}\n")
