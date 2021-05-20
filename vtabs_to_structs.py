@@ -53,14 +53,13 @@ def unicorn_init():
 
     # Fingers crossed there are no holes in this VM region...
     start = ida_segment.get_first_seg().start_ea
-    insz = (os.path.getsize(idc.get_input_file_path()) + 0x400) & ~0x3ff
-    end = start + insz
+    end = (ida_segment.get_last_seg().end_ea + 0x400) & ~0x3ff
     stack_bottom = end
 
     uc = Uc(UC_ARCH_ARM64, UC_MODE_LITTLE_ENDIAN)
 
-    # map the entire kc and stack only once
-    uc.mem_map(start, insz)
+    # Map the entire kc and stack only once
+    uc.mem_map(start, end - start)
     uc.mem_map(stack_bottom, 0x400)
 
     uc.reg_write(UC_ARM64_REG_SP, stack_bottom + 0x400)
@@ -233,26 +232,37 @@ def read_cstring(ea):
 
 class InheritanceHierarchy:
     # parent: pointer to InheritanceHierarchy for the parent class
-    parent = None
+    # parent = None
     # children: list of the children InheritanceHierarchy objs of this
     #           class, can be empty
-    children = []
+    # children = []
     # name: name of this class
-    name = ""
+    # name = ""
     # sz: size of this class, without inheritance
-    sz = 0
+    # sz = 0
     # totsz: size of this class, including the inheritance
-    totsz = 0
+    # totsz = 0
 
     def __init__(self, parent, name, sz, totsz):
         self.parent = parent
-        # self.children.append(child)
+        self.children = []
         self.name = name
         self.sz = sz
         self.totsz = totsz
 
     def add_child(self, child):
+        for c in self.children:
+            if c.name == child.name:
+                return
+
+        # if self.name == "IO80211InfraInterface":
+        print("Adding {} to {}'s children".format(child.name, self.name))
+
         self.children.append(child)
+        print("Child list size {}".format(len(self.children)))
+
+    def set_totsz(self, totsz):
+        self.totsz = totsz
 
 def get_OSMetaClass_ctor():
     all_fxns = list(idautils.Functions())
@@ -266,6 +276,15 @@ def get_OSMetaClass_ctor():
             return fxnea
 
     return 0
+
+# def hook_invalid(mu, access, address, size, value, user_data):
+#     print("Invalid memory access at 0x%x..." %(address));
+#     mu.mem_map(address, 1024)
+#     return True
+
+# def hook_invalid_insn(uc):
+#     print("Invalid instruction ")
+#     return
 
 # Overrides for x1, x2, and x3, may get set in hook_code
 reg_overrides = [0, 0, 0]
@@ -282,7 +301,20 @@ def hook_code(uc, address, size, user_data):
 
     insn = int.from_bytes(uc.mem_read(address, size), byteorder='little')
 
-    print(">>> Tracing 0x%x at 0x%x, instruction size = 0x%x" %(insn, address, size))
+    # print(">>> Tracing 0x%x at 0x%x, instruction size = 0x%x" %(insn, address, size))
+
+    # Skip any PAC instrs
+    # if (insn & 0xfffff01f) == 0xd503201f:
+    #     print("SKIPPING POTENTIAL PAC INSTR")
+    #     uc.reg_write(UC_ARM64_REG_PC, address + 4)
+    #     return
+
+    cd = list(capstone_disas(address))
+
+    if len(cd) == 0:
+        print("SKIPPING INSN {}".format(hex(insn)))
+        uc.reg_write(UC_ARM64_REG_PC, address + 4)
+        return
 
     x1 = uc.reg_read(UC_ARM64_REG_X1)
     x2 = uc.reg_read(UC_ARM64_REG_X2)
@@ -297,8 +329,15 @@ def hook_code(uc, address, size, user_data):
     ldr_src = 0
     ldr_disp = 0
 
-    for disas in capstone_disas(address):
+    for disas in cd:
         # print("{} {}: ID {}".format(disas.mnemonic, disas.op_str, disas.id))
+        # If we're gonna execute a BL while trying to reach the
+        # current xref, just skip it
+        if disas.id == ARM64_INS_BL:
+            print("SKIPPING BL")
+            uc.reg_write(UC_ARM64_REG_PC, address + 4)
+            return
+
         if disas.id == ARM64_INS_LDR:
             for op in disas.operands:
                 # print("{}".format(op.type))
@@ -324,18 +363,6 @@ def hook_code(uc, address, size, user_data):
                     x2 += ldr_disp
                     reg_overrides[1] = x2
 
-    # if (insn & 0xbfc00000) == 0xb9400000:
-    #     pimm = 
-
-    # if x1 != 0:
-    #     reg_overrides[0] = x1
-
-    # if x2 != 0:
-    #     reg_overrides[1] = x2
-
-    # if w3 != 0:
-    #     reg_overrides[2] = w3
-
 # Emulate up to some point and return (x1, x2, w3)
 def emulate(startea, endea):
     global reg_overrides
@@ -343,18 +370,26 @@ def emulate(startea, endea):
     global uc
 
     # Align on a 1024-byte boundry
-    len = ((endea - startea) + 0x400) & ~0x3ff
-
     aligned_startea = startea & ~0x3ff
-    aligned_endea = (endea + len) & ~0x3ff
+    aligned_endea = (endea + 0x400) & ~0x3ff
 
-    print("start {} end {} len {}".format(hex(aligned_startea), \
-            hex(aligned_endea), hex(len)))
+    len = aligned_endea - aligned_startea
+
+    # print("startea {} endea {}".format(hex(startea), hex(endea)))
+    # print("start {} end {} len {}".format(hex(aligned_startea), \
+    #         hex(aligned_endea), hex(len)))
 
     uc.reg_write(UC_ARM64_REG_SP, stack_bottom + 0x400)
     uc.mem_write(aligned_startea, ida_bytes.get_bytes(aligned_startea, len))
     uc.hook_add(UC_HOOK_CODE, hook_code, begin=startea, end=endea)
+    # uc.hook_add(UC_HOOK_INSN_INVALID, hook_invalid_insn)
+    # uc.hook_add(UC_HOOK_INSN, hook_invalid_insn)
+    # uc.hook_add(UC_HOOK_MEM_WRITE_UNMAPPED, hook_invalid)
+    # try:
     uc.emu_start(startea, endea)
+    # except UcError as e:
+    #     print("ERROR: %s" % e)
+    # print("Done")
 
     x1 = uc.reg_read(UC_ARM64_REG_X1)
     x2 = uc.reg_read(UC_ARM64_REG_X2)
@@ -384,8 +419,8 @@ def get_OSMetaClass_ctor_args(ea):
     # Then we emulate it up to the function call
     params = emulate(fxnstart, ea)
 
-    for i in range(len(params)):
-        print("x{}: {}".format(i+1, hex(params[i])))
+    # for i in range(len(params)):
+    #     print("x{}: {}".format(i+1, hex(params[i])))
 
     classname = read_cstring(params[0])
 
@@ -402,9 +437,28 @@ def get_OSMetaClass_ctor_args(ea):
 
     return [ superclass_name, classname.decode(), params[2] ]
 
-def dump_ihs(ihs):
-    for ih in ihs:
-        # Go 
+def write_spaces(amt):
+    while amt > 0:
+        print("    ", end="")
+        amt -= 1
+
+def desc_ih(ih):
+    print("{} ({} bytes, total {} bytes)".format(ih.name, ih.sz, ih.totsz), end="")
+
+def dump_ih(ih, level):
+    # if level == 1:
+    # write_spaces(level)
+    print("[{}]  ".format(level), end="")
+    desc_ih(ih)
+    print(" ---> ", end="")
+
+    for child in ih.children:
+        # desc_ih(child)
+        dump_ih(child, level + 1)
+        print()
+
+    # print(" [END({})]".format(ih.name))
+    # print()
 
 def main():
     capstone_init()
@@ -444,36 +498,92 @@ def main():
         frm = xref.frm
         # test
         # frm = 0x63920
-        print("xref from {}".format(hex(frm)))
+        # print("xref from {}".format(hex(frm)))
         args = get_OSMetaClass_ctor_args(frm)
 
-        parent_name = args[0]
-        class_name = args[1]
-        class_size = args[2]
+        pname = args[0]
+        cname = args[1]
 
-        print("Parent: {} class: {} class size: {}".format(parent_name, class_name, hex(class_size)))
+        if pname == cname:
+            continue
+
+        # Make sure we are not adding duplicates
+        # if cname in ih_dict:
+        #     continue
+
+        csz = args[2]
+
+        if pname == "IO80211InfraInterface":
+            print("Parent: {} class: {} class size: {}".format(pname, cname, hex(csz)))
 
         # First, check if there's already an entry for the parent
         # and connect them if there is
-        if parent_name in ih_dict:
-            parent_ih = ih_dict[parent_name]
-            totsz = parent_ih.totsz + class_size
-            child_ih = InheritanceHierarchy(parent_ih, class_name, class_sz, totsz)
-            ih_dict[class_name] = child_ih
-            parent_ih.add_child(child_ih)
-        else:
-            ih_dict[class_name] = InheritanceHierarchy(None, class_name, class_sz, class_sz)
+        # if pname in ih_dict:
+        #     parent_ih = ih_dict[pname]
+        #     totsz = parent_ih.totsz + csz
+        #     child_ih = InheritanceHierarchy(parent_ih, cname, csz, totsz)
+        #     ih_dict[cname] = child_ih
+        #     parent_ih.add_child(child_ih)
+        # else:
+        #     ih_dict[cname] = InheritanceHierarchy(None, cname, csz, csz)
+
+        if pname not in ih_dict:
+            ih_dict[pname] = InheritanceHierarchy(None, pname, csz, csz)
+
+        if cname not in ih_dict:
+            ih_dict[cname] = InheritanceHierarchy(None, cname, csz, csz)
+
+        parent_ih = ih_dict[pname]
+        child_ih = ih_dict[cname]
+        # print("parent ih {} child ih {}".format(parent_ih, child_ih))
+
+        totsz = parent_ih.totsz + csz
+        
+        parent_ih.add_child(child_ih)
+        child_ih.parent = parent_ih
+        child_ih.set_totsz(totsz)
+
+        # child_ih = InheritanceHierarchy(parent_ih, cname, csz, totsz)
+        # ih_dict[cname] = child_ih
+        # parent_ih.add_child(child_ih)
 
         num += 1
-        if num == 10:
-            break
+        # if num == 10:
+        #     break
+
+    print("First pass: {} classes processed".format(num))
+    num = 0
 
     # Second pass
     for ih in ih_dict.values():
-        if ih.parent.name == "OSObject":
+        # print(ih.name)
+        if ih.parent == None:
+            # print("Adding {} to the ihs list".format(ih.name))
+            num += 1
             ihs.append(ih)
+        # if ih.parent.name == "OSObject":
+        #     ihs.append(ih.parent)
 
-    ihs_dump(ihs)
+    print("Second pass: {} classes added to ihs list".format(num))
+
+    # print(ihs)
+    # ih = ihs[1]
+
+    # print("{}: ".format(ih.name))
+
+    # for child in ih.children:
+    #     print(child.name)
+
+    # return
+    for ih in ihs:
+        dump_ih(ih, 0)
+        # break
+        num += 1
+        # if num == 3:
+        #     break
+
+    # OSObject should really be the only 
+    # dump_ih(ih_dict["OSObject"])
 
     return
 
