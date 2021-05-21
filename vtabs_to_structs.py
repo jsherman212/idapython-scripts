@@ -63,6 +63,7 @@ def unicorn_init():
     uc.mem_map(stack_bottom, 0x400)
 
     uc.reg_write(UC_ARM64_REG_SP, stack_bottom + 0x400)
+    uc.reg_write(UC_ARM64_REG_CPACR_EL1, 0x300000)
 
 # important - order by length
 c_keywords = ["volatile", "unsigned", "register", "struct", "static",
@@ -230,6 +231,22 @@ def read_cstring(ea):
     len = ida_bytes.get_max_strlit_length(ea, ida_nalt.STRTYPE_C)
     return ida_bytes.get_strlit_contents(ea, len, ida_nalt.STRTYPE_C)
 
+class SymbolicatedVtable:
+    # name: class name this vtable is for
+    # fields: list of strings, each representing one virtual function
+    def __init__(self, name):
+        self.name = name
+        self.fields = []
+
+    def add(self, field):
+        if field not in self.fields:
+            self.fields.append(field)
+
+class IOKitClass:
+    # svt: pointer to SymbolicatedVtable object
+    def __init__(self, svt):
+        self.svt = svt
+
 class InheritanceHierarchy:
     # parent: pointer to InheritanceHierarchy for the parent class
     # children: list of the children InheritanceHierarchy objs of this
@@ -237,26 +254,23 @@ class InheritanceHierarchy:
     # name: name of this class
     # sz: size of this class, without inheritance
     # totsz: size of this class, including the inheritance
-    def __init__(self, parent, name, sz, totsz=0):
+    # ioc: pointer to IOKitClass for this given class
+    def __init__(self, parent, name, sz, totsz=0, ioc=None):
         self.parent = parent
         self.children = []
         self.name = name
         self.sz = sz
         self.totsz = totsz
+        self.ioc = ioc
 
     def add_child(self, child):
         for c in self.children:
             if c.name == child.name:
                 return
-
         # if self.name == "IO80211InfraInterface":
         # print("Adding {} to {}'s children".format(child.name, self.name))
-
         self.children.append(child)
         # print("Child list size {}".format(len(self.children)))
-
-    # def set_totsz(self, totsz):
-    #     self.totsz = totsz
 
 def get_OSMetaClass_ctor():
     all_fxns = list(idautils.Functions())
@@ -271,14 +285,14 @@ def get_OSMetaClass_ctor():
 
     return 0
 
-# def hook_invalid(mu, access, address, size, value, user_data):
-#     print("Invalid memory access at 0x%x..." %(address));
-#     mu.mem_map(address, 1024)
-#     return True
+def hook_invalid(mu, access, address, size, value, user_data):
+    print("Invalid memory access at 0x%x..." %(address));
+    mu.mem_map(address, 1024)
+    return True
 
-# def hook_invalid_insn(uc):
-#     print("Invalid instruction ")
-#     return
+def hook_invalid_insn(uc):
+    print("Invalid instruction ")
+    return
 
 # Overrides for x1, x2, and x3, may get set in hook_code
 reg_overrides = [0, 0, 0]
@@ -306,7 +320,7 @@ def hook_code(uc, address, size, user_data):
     cd = list(capstone_disas(address))
 
     if len(cd) == 0:
-        print("SKIPPING INSN {}".format(hex(insn)))
+        # print("SKIPPING INSN {}".format(hex(insn)))
         uc.reg_write(UC_ARM64_REG_PC, address + 4)
         return
 
@@ -328,7 +342,7 @@ def hook_code(uc, address, size, user_data):
         # If we're gonna execute a BL while trying to reach the
         # current xref, just skip it
         if disas.id == ARM64_INS_BL:
-            print("SKIPPING BL")
+            # print("SKIPPING BL")
             uc.reg_write(UC_ARM64_REG_PC, address + 4)
             return
 
@@ -376,9 +390,9 @@ def emulate(startea, endea):
     uc.reg_write(UC_ARM64_REG_SP, stack_bottom + 0x400)
     uc.mem_write(aligned_startea, ida_bytes.get_bytes(aligned_startea, len))
     uc.hook_add(UC_HOOK_CODE, hook_code, begin=startea, end=endea)
-    # uc.hook_add(UC_HOOK_INSN_INVALID, hook_invalid_insn)
+    uc.hook_add(UC_HOOK_INSN_INVALID, hook_invalid_insn)
     # uc.hook_add(UC_HOOK_INSN, hook_invalid_insn)
-    # uc.hook_add(UC_HOOK_MEM_WRITE_UNMAPPED, hook_invalid)
+    uc.hook_add(UC_HOOK_MEM_WRITE_UNMAPPED, hook_invalid)
     # try:
     uc.emu_start(startea, endea)
     # except UcError as e:
@@ -404,7 +418,7 @@ def emulate(startea, endea):
 # addressing of class name is resolved to a string
 # ea points to a BL to OSMetaClass::OSMetaClass
 def get_OSMetaClass_ctor_args(ea):
-    args = idaapi.get_arg_addrs(ea)
+    # args = idaapi.get_arg_addrs(ea)
 
     # Lazy solution - just let unicorn emulate it up to the BL
     # First we gotta figure out the start of this function
@@ -417,17 +431,19 @@ def get_OSMetaClass_ctor_args(ea):
     #     print("x{}: {}".format(i+1, hex(params[i])))
 
     classname = read_cstring(params[0])
-
     superclass = params[1]
-    superclass_name = idc.demangle_name(idaapi.get_name(params[1]), get_inf_attr(idc.INF_LONG_DN))
-    
-    # In case the superclass pointer references a pointer that is
-    # meant to be resolved later
-    if superclass_name == None:
-        superclass_name = idaapi.get_name(ida_bytes.get_qword(params[1]))
-        superclass_name = idc.demangle_name(superclass_name, get_inf_attr(idc.INF_LONG_DN))
+    superclass_name = None
 
-    superclass_name = superclass_name[0:superclass_name.find("::")]
+    if superclass != 0:
+        superclass_name = idc.demangle_name(idaapi.get_name(params[1]), get_inf_attr(idc.INF_LONG_DN))
+        
+        # In case the superclass pointer references a pointer that is
+        # meant to be resolved later
+        if superclass_name == None:
+            superclass_name = idaapi.get_name(ida_bytes.get_qword(params[1]))
+            superclass_name = idc.demangle_name(superclass_name, get_inf_attr(idc.INF_LONG_DN))
+
+        superclass_name = superclass_name[0:superclass_name.find("::")]
 
     return [ superclass_name, classname.decode(), params[2] ]
 
@@ -438,17 +454,18 @@ def write_spaces(amt):
 
 def desc_ih(ih):
     # print("{} ({} bytes, total {} bytes)".format(ih.name, ih.sz, ih.totsz), end="")
-    if ih.parent != None:
+    # if ih.parent != None:
         # print("{} (parent: {}, parent class size: {} bytes, child class size: {} bytes," \
         #         " parent class total size: {} bytes, child class total size: {} bytes)".format(ih.name,    \
         #             ih.parent.name, ih.parent.sz, ih.sz, ih.parent.totsz, \
         #             ih.totsz))
-        print("{} (parent: {}, ME:{}/P:{}, TOTAL:{})".format(ih.name, ih.parent.name, \
-                ih.sz, ih.parent.sz, ih.totsz))
-    else:
+        # print("{} (parent: {}, ME:{}/P:{}, TOTAL:{})".format(ih.name, ih.parent.name, \
+        #         ih.sz, ih.parent.sz, ih.totsz))
+    print("{} ({} bytes)".format(ih.name, ih.sz))
+    # else:
         # print("{} (parent: none, child class size: {} bytes, child class total size: {} bytes)".format(ih.name,    \
         #             ih.sz, ih.totsz))
-        print("{} ({})".format(ih.name, ih.sz))
+        # print("{} ({})".format(ih.name, ih.sz))
         # print("{} (parent: none, {} bytes, total {} bytes)".format(ih.name, ih.sz, ih.totsz))
 
 def dump_ih(ih, level):
@@ -465,6 +482,57 @@ def dump_ih(ih, level):
 
     # print(" [END({})]".format(ih.name))
     # print()
+
+def generate_structs_for_children(file, ih, padname):
+    if len(ih.children) == 0:
+        return
+
+    for child in ih.children:
+        file.write("struct /*VFT*/ {}_vtbl {{\n".format(child.name))
+
+        if child.ioc != None:
+            for vtab_field in child.ioc.svt.fields:
+                file.write("\t{}\n".format(vtab_field))
+        else:
+            print("Child {} has no vtable...".format(child.name))
+
+        file.write("};\n\n")
+
+        if child.parent != None:
+            file.write("struct __cppobj {}_mbrs : {}_mbrs {{\n".format(child.name,
+                child.parent.name))
+            file.write("\tuint8_t __pad{}[{}];\n".format(padname, ih.sz))
+            file.write("};\n\n")
+
+            file.write("struct __cppobj {} {{\n".format(child.name))
+            file.write("\t{}_vtbl *__vftable /*VFT*/;\n".format(child.name))
+            file.write("\t{}_mbrs __members;\n".format(child.name))
+            file.write("};\n\n")
+        else:
+            print("******Child {} has no parent???".format(child.name))
+
+        generate_structs_for_children(file, child, padname + 1)
+
+def generate_header_file(file, ihs):
+    for ih in ihs:
+        if ih.ioc != None:
+            file.write("struct /*VFT*/ {}_vtbl {{\n".format(ih.name))
+
+            for vtab_field in ih.ioc.svt.fields:
+                file.write("\t{}\n".format(vtab_field))
+
+            file.write("};\n\n")
+
+            file.write("struct __cppobj {}_mbrs {{\n".format(ih.name))
+            file.write("\tuint8_t __pad0[{}];\n".format(ih.sz))
+            file.write("};\n\n")
+
+            file.write("struct __cppobj {} {{\n".format(ih.name))
+            file.write("\t{}_vtbl *__vftable /*VFT*/;\n".format(ih.name))
+            file.write("\t{}_mbrs __members;\n".format(ih.name))
+            file.write("};\n\n")
+
+        generate_structs_for_children(file, ih, 0)
 
 def main():
     capstone_init()
@@ -509,12 +577,16 @@ def main():
         pname = args[0]
         cname = args[1]
 
+        if cname == "OSMetaClassBase":
+            print("xref from {}".format(hex(frm)))
+            print(args)
+
         if pname == cname:
             continue
 
         csz = args[2]
 
-        new_parent = pname not in ih_dict
+        new_parent = pname is not None and pname not in ih_dict
         new_child = cname not in ih_dict
 
         if new_parent:
@@ -523,11 +595,16 @@ def main():
         if new_child:
             ih_dict[cname] = InheritanceHierarchy(None, cname, csz)
 
-        parent_ih = ih_dict[pname]
-        child_ih = ih_dict[cname]
-        parent_ih.add_child(child_ih)
-        child_ih.parent = parent_ih
-        child_ih.totsz = child_ih.sz + parent_ih.totsz
+        if pname == None:
+            # If this class has no superclass, it must be parent class,
+            # so make its InheritanceHierarchy object
+            ih_dict[cname] = InheritanceHierarchy(None, cname, csz)
+        else:
+            child_ih = ih_dict[cname]
+            parent_ih = ih_dict[pname]
+            parent_ih.add_child(child_ih)
+            child_ih.parent = parent_ih
+            child_ih.totsz = child_ih.sz + parent_ih.totsz
 
         num += 1
         # if num == 10:
@@ -546,11 +623,11 @@ def main():
     print("Second pass: {} classes added to ihs list".format(num))
     num = 0
 
-    for ih in ihs:
-        dump_ih(ih, 0)
-        num += 1
+    # for ih in ihs:
+    #     dump_ih(ih, 0)
+    #     num += 1
 
-    return
+    # return
 
     vtables = []
 
@@ -565,17 +642,45 @@ def main():
 
     # First, get some common objects in there
     # struct_file.write(
-    #         "struct __cppobj OSMetaClassBase {\n" \
-    #         "\t
-    #         "struct __cppobj OSObject : OSMetaClassBase {\n" \
-    #         "\tint retainCount;\n" \
-    #         "};\n")
-
-    
-    # return
+    #         "struct __cppobj ExpansionData {};\n\n"
+    #         "struct __cppobj OSMetaClassBase_vtbl;\n\n"
+    #         "struct __cppobj OSMetaClassBase_mbrs {};\n\n"
+    #         "struct __cppobj OSMetaClassBase {\n"
+    #         "\tOSMetaClassBase_vtbl *__vftable /*VFT*/;\n"
+    #         "\tOSMetaClassBase_mbrs __members;\n"
+    #         "};\n\n"
+    #         "struct __cppobj OSObject_mbrs : OSMetaClassBase_mbrs {\n"
+    #         "\tint retainCount;\n"
+    #         "};\n\n"
+    #         "struct __cppobj OSObject_vtbl : OSMetaClassBase_vtbl {};\n\n"
+    #         "struct __cppobj OSObject {\n"
+    #         "\tOSObject_vtbl *__vftable;\n"
+    #         "\tOSObject_mbrs __members;\n"
+    #         "};\n\n"
+    #         "struct __cppobj OSMetaClass_mbrs : OSMetaClassBase_mbrs {\n"
+    #         "\tExpansionData *reserved;\n"
+    #         "\tconst OSMetaClass *superClassLink;\n"
+    #         "\tconst OSSymbol *className;\n"
+    #         "\tunsigned int classSize;\n"
+    #         "\tunsigned int instanceCount;\n"
+    #         "};\n\n"
+    #         "struct __cppobj OSMetaClass {\n"
+    #         "\tOSMetaClassBase_vtbl *__vftable;\n"
+    #         "\tOSMetaClass_mbrs __members;\n"
+    #         "};\n\n"
+    #         "struct __cppobj OSString_mbrs : OSObject_mbrs {\n"
+    #         "\tunsigned __int32 flags : 14;\n"
+    #         "\tunsigned __int32 length : 18;\n"
+    #         "\tchar *string;\n"
+    #         "};\n\n"
+    #         "struct __cppobj OSString {\n"
+    #         "\tOSObject_vtbl *__vftable;\n"
+    #         "\tOSString_mbrs __members;\n"
+    #         "};\n\n"
+    #         "struct __cppobj OSSymbol : OSString {};\n\n"
+    #         )
 
     num_failed_get_type = 0
-
     cnt = 0
 
     for vtable in vtables:
@@ -591,12 +696,12 @@ def main():
         if class_name in BLACKLIST:
             continue
 
-        ea = vtable[0] + 8;
+        ea = vtable[0]#+ 8;
 
         while ida_bytes.get_qword(ea) == 0:
             ea += 8
 
-        print("EA: {}".format(hex(ea)))
+        # print("EA: {}".format(hex(ea)))
         if is_unknown(ida_bytes.get_flags(ea)):
             continue
 
@@ -635,7 +740,7 @@ def main():
 
         cnt += 1
 
-        print("{}".format(class_name))
+        # print("{}".format(class_name))
 
         # skip NULL pointers until we hit a function
         while ida_bytes.get_qword(ea) == 0:
@@ -653,6 +758,10 @@ def main():
 
         fwd_decls = set()
         fwd_decls.add(class_name)
+
+        svt = SymbolicatedVtable(class_name)
+        ioc = IOKitClass(svt)
+        ioc.svt = svt
 
         # vtables seem to be NULL terminated
         while True:
@@ -704,7 +813,7 @@ def main():
                     #     # print("Hello")
                     #     fxn_args_string = "IOService *, unsigned int, void *, void (*)(OSObject *, void (*)(TestType *, AppleUSBCDCControl*, void *, USBCDCNotification *), AppleUSBCDCControl*, void *, USBCDCNotification *)"
 
-                    print("fxn args: {}".format(fxn_args_string))
+                    # print("fxn args: {}".format(fxn_args_string))
 
 
                     # if fxn_args_string == "OSObject *, void (*)(OSObject *, IOHDCPAuthSession *), IOHDCPMessageTransport *, IOHDCPInterface *":
@@ -793,44 +902,57 @@ def main():
                 if "DTOR" in fxn_name:
                     num_dtors += 1
 
+            curfield = ""
+
             if fxn_name == "___cxa_pure_virtual":
-                struct_fields.append("\tvoid __noreturn (__cdecl *___cxa_pure_virtual{})({});".format(num_virts,
-                    fxn_args))
+                # struct_fields.append("\tvoid __noreturn (__cdecl *___cxa_pure_virtual{})({});".format(num_virts,
+                #     fxn_args))
+                curfield = "\tvoid __noreturn (__cdecl *___cxa_pure_virtual{})({});".format(num_virts, fxn_args)
                 num_virts += 1
             else:
-                struct_fields.append("\t{} ({} *{})({});".format(fxn_return_type,
-                    fxn_call_conv, fxn_name, fxn_args))
+                # struct_fields.append("\t{} ({} *{})({});".format(fxn_return_type,
+                #     fxn_call_conv, fxn_name, fxn_args))
+                curfield = "\t{} ({} *{})({});".format(fxn_return_type,
+                        fxn_call_conv, fxn_name, fxn_args)
+
+            svt.add(curfield)
 
             ea += 8
 
+        # Some classes won't have xrefs to OSMetaClass::OSMetaClass,
+        # like OSMetaClassBase
+        if class_name in ih_dict:
+            ih_dict[class_name].ioc = ioc
+
+        # Just write forward decls for now
         for decl in fwd_decls:
-            struct_file.write("struct {};\n".format(decl))
+            struct_file.write("struct __cppobj {};\n".format(decl))
 
         struct_file.write("\n")
 
         # sym so I don't conflict with other structs in my current database
         # change to 'vtable' when I make a new database
-        struct_file.write("struct /*VFT*/ {}_vtbl {{\n".format(class_name))
+        # struct_file.write("struct /*VFT*/ {}_vtbl {{\n".format(class_name))
 
-        for field in struct_fields:
-            print("Writing field {}".format(field))
-            struct_file.write("\t{}\n".format(field))
+        # for field in struct_fields:
+            # print("Writing field {}".format(field))
+            # struct_file.write("\t{}\n".format(field))
 
-        struct_file.write("};\n\n")
+        # struct_file.write("};\n\n")
         
         # if "::" in class_name:
         #     struct_file.write("struct {}::fields {{\n".format(class_name))
         # else:
         #     struct_file.write("struct {}_fields {{\n".format(class_name))
 
-        struct_file.write("struct __cppobj {}_mbrs {{\n".format(class_name))
+        # struct_file.write("struct __cppobj {}_mbrs {{\n".format(class_name))
 
         # struct_file.write("\tuint8_t pad[0x3000];\n")
-        struct_file.write("};\n\n")
+        # struct_file.write("};\n\n")
 
-        struct_file.write("struct __cppobj {} {{\n".format(class_name))
-        struct_file.write("\tstruct {}_vtbl *__vftable /*VFT*/;\n".format(class_name))
-        struct_file.write("\tstruct {}_mbrs __members;\n".format(class_name))
+        # struct_file.write("struct __cppobj {} {{\n".format(class_name))
+        # struct_file.write("\tstruct {}_vtbl *__vftable /*VFT*/;\n".format(class_name))
+        # struct_file.write("\tstruct {}_mbrs __members;\n".format(class_name))
 
 
         # if "::" in class_name:
@@ -838,14 +960,21 @@ def main():
         # else:
         #     struct_file.write("\tstruct {}_fields f;\n".format(class_name))
 
-        struct_file.write("};\n\n")
+        # struct_file.write("};\n\n")
 
-        cnt += 1
+        # cnt += 1
 
-        if cnt == 5:
-            break
+        # if cnt == 5:
+        #     break
 
     print("{} IOKit vtables".format(len(vtables)))
+
+    # Now create the header file to import into IDA
+    # for ih in ihs:
+    #     dump_ih(ih, 0)
+
+    generate_header_file(struct_file, ihs)
+
     struct_file.close()
     # print("{} failed get_type's".format(num_failed_get_type))
 
