@@ -232,18 +232,12 @@ def read_cstring(ea):
 
 class InheritanceHierarchy:
     # parent: pointer to InheritanceHierarchy for the parent class
-    # parent = None
     # children: list of the children InheritanceHierarchy objs of this
     #           class, can be empty
-    # children = []
     # name: name of this class
-    # name = ""
     # sz: size of this class, without inheritance
-    # sz = 0
     # totsz: size of this class, including the inheritance
-    # totsz = 0
-
-    def __init__(self, parent, name, sz, totsz):
+    def __init__(self, parent, name, sz, totsz=0):
         self.parent = parent
         self.children = []
         self.name = name
@@ -256,13 +250,13 @@ class InheritanceHierarchy:
                 return
 
         # if self.name == "IO80211InfraInterface":
-        print("Adding {} to {}'s children".format(child.name, self.name))
+        # print("Adding {} to {}'s children".format(child.name, self.name))
 
         self.children.append(child)
-        print("Child list size {}".format(len(self.children)))
+        # print("Child list size {}".format(len(self.children)))
 
-    def set_totsz(self, totsz):
-        self.totsz = totsz
+    # def set_totsz(self, totsz):
+    #     self.totsz = totsz
 
 def get_OSMetaClass_ctor():
     all_fxns = list(idautils.Functions())
@@ -443,19 +437,31 @@ def write_spaces(amt):
         amt -= 1
 
 def desc_ih(ih):
-    print("{} ({} bytes, total {} bytes)".format(ih.name, ih.sz, ih.totsz), end="")
+    # print("{} ({} bytes, total {} bytes)".format(ih.name, ih.sz, ih.totsz), end="")
+    if ih.parent != None:
+        # print("{} (parent: {}, parent class size: {} bytes, child class size: {} bytes," \
+        #         " parent class total size: {} bytes, child class total size: {} bytes)".format(ih.name,    \
+        #             ih.parent.name, ih.parent.sz, ih.sz, ih.parent.totsz, \
+        #             ih.totsz))
+        print("{} (parent: {}, ME:{}/P:{}, TOTAL:{})".format(ih.name, ih.parent.name, \
+                ih.sz, ih.parent.sz, ih.totsz))
+    else:
+        # print("{} (parent: none, child class size: {} bytes, child class total size: {} bytes)".format(ih.name,    \
+        #             ih.sz, ih.totsz))
+        print("{} ({})".format(ih.name, ih.sz))
+        # print("{} (parent: none, {} bytes, total {} bytes)".format(ih.name, ih.sz, ih.totsz))
 
 def dump_ih(ih, level):
     # if level == 1:
-    # write_spaces(level)
-    print("[{}]  ".format(level), end="")
+    write_spaces(level)
+    # print("[{}]  ".format(level), end="")
     desc_ih(ih)
-    print(" ---> ", end="")
+    # print(" ---> ", end="")
 
     for child in ih.children:
         # desc_ih(child)
+        # print()
         dump_ih(child, level + 1)
-        print()
 
     # print(" [END({})]".format(ih.name))
     # print()
@@ -471,10 +477,9 @@ def main():
     #   First pass: for each class, gather class name, parent class name,
     #               and superclass name, and connect them
     #   Second pass: for each inheritance hierarchy object, we check
-    #                   if the parent pointer is OSObject (signaling a top-level
+    #                   if the parent pointer is None (signaling a top-level
     #                   class), and add that to the `ihs` list
-    # We can do this by processing xrefs to OSMetaClass::OSMetaClass
-
+    # We can do this whole thing by processing xrefs to OSMetaClass::OSMetaClass
     OSMetaClass_ctor = get_OSMetaClass_ctor()
 
     if OSMetaClass_ctor == 0:
@@ -507,45 +512,22 @@ def main():
         if pname == cname:
             continue
 
-        # Make sure we are not adding duplicates
-        # if cname in ih_dict:
-        #     continue
-
         csz = args[2]
 
-        if pname == "IO80211InfraInterface":
-            print("Parent: {} class: {} class size: {}".format(pname, cname, hex(csz)))
+        new_parent = pname not in ih_dict
+        new_child = cname not in ih_dict
 
-        # First, check if there's already an entry for the parent
-        # and connect them if there is
-        # if pname in ih_dict:
-        #     parent_ih = ih_dict[pname]
-        #     totsz = parent_ih.totsz + csz
-        #     child_ih = InheritanceHierarchy(parent_ih, cname, csz, totsz)
-        #     ih_dict[cname] = child_ih
-        #     parent_ih.add_child(child_ih)
-        # else:
-        #     ih_dict[cname] = InheritanceHierarchy(None, cname, csz, csz)
-
-        if pname not in ih_dict:
+        if new_parent:
             ih_dict[pname] = InheritanceHierarchy(None, pname, csz, csz)
 
-        if cname not in ih_dict:
-            ih_dict[cname] = InheritanceHierarchy(None, cname, csz, csz)
+        if new_child:
+            ih_dict[cname] = InheritanceHierarchy(None, cname, csz)
 
         parent_ih = ih_dict[pname]
         child_ih = ih_dict[cname]
-        # print("parent ih {} child ih {}".format(parent_ih, child_ih))
-
-        totsz = parent_ih.totsz + csz
-        
         parent_ih.add_child(child_ih)
         child_ih.parent = parent_ih
-        child_ih.set_totsz(totsz)
-
-        # child_ih = InheritanceHierarchy(parent_ih, cname, csz, totsz)
-        # ih_dict[cname] = child_ih
-        # parent_ih.add_child(child_ih)
+        child_ih.totsz = child_ih.sz + parent_ih.totsz
 
         num += 1
         # if num == 10:
@@ -556,34 +538,17 @@ def main():
 
     # Second pass
     for ih in ih_dict.values():
-        # print(ih.name)
         if ih.parent == None:
             # print("Adding {} to the ihs list".format(ih.name))
             num += 1
             ihs.append(ih)
-        # if ih.parent.name == "OSObject":
-        #     ihs.append(ih.parent)
 
     print("Second pass: {} classes added to ihs list".format(num))
+    num = 0
 
-    # print(ihs)
-    # ih = ihs[1]
-
-    # print("{}: ".format(ih.name))
-
-    # for child in ih.children:
-    #     print(child.name)
-
-    # return
     for ih in ihs:
         dump_ih(ih, 0)
-        # break
         num += 1
-        # if num == 3:
-        #     break
-
-    # OSObject should really be the only 
-    # dump_ih(ih_dict["OSObject"])
 
     return
 
