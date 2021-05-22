@@ -178,16 +178,10 @@ def get_arg_type_list(fxn_args):
 def get_fwd_decls(arg_type_list):
     fwd_decls = []
 
-    # print("get_fwd_decls: {}, {}".format(arg_type_list, type(arg_type_list)))
     for arg_type in arg_type_list:
-        # print("get_fwd_decls: current arg is {}".format(arg_type))
         raw_arg_type = get_raw_type(arg_type)
 
-        # print("get_fwd_decls: raw type {}".format(raw_arg_type))
-
         if should_fwd_decl(raw_arg_type):
-            # print(raw_arg_type)
-
             # check if we got a function pointer argument
             # in this case, we need to scan all its args and forward
             # declare those as needed
@@ -196,19 +190,11 @@ def get_fwd_decls(arg_type_list):
                 # remove C keywords and primitive types from the list of function
                 # pointer arguments
                 fxn_ptr_raw_arg_types = [raw_arg_type for raw_arg_type in raw_arg_type.split(",") if is_primitive_type(raw_arg_type) == False and raw_arg_type not in c_keywords]
-                # print("get_fwd_decls: fxn_ptr_raw_arg_types: {}".format(fxn_ptr_raw_arg_types))
                 for fxn_ptr_raw_arg_type in fxn_ptr_raw_arg_types:
                     if should_fwd_decl(fxn_ptr_raw_arg_type):
-                        # print(fxn_ptr_raw_arg_type)
                         fwd_decls.append(fix_type(fxn_ptr_raw_arg_type))
             else:
                 fwd_decls.append(fix_type(raw_arg_type))
-
-        # primitive types don't need to be fwd declared
-        # if is_primitive(raw_arg_type):
-        #     continue
-
-        # print(raw_arg_type)
 
     return fwd_decls
 
@@ -483,6 +469,8 @@ def dump_ih(ih, level):
     # print(" [END({})]".format(ih.name))
     # print()
 
+# We subtract 8 from the padding to account for the vtable (which is
+# not included in the member structure)
 def generate_structs_for_children(file, ih, padname):
     if len(ih.children) == 0:
         return
@@ -501,12 +489,38 @@ def generate_structs_for_children(file, ih, padname):
         if child.parent != None:
             file.write("struct __cppobj {}_mbrs : {}_mbrs {{\n".format(child.name,
                 child.parent.name))
-            file.write("\tuint8_t __pad{}[{}];\n".format(padname, ih.sz))
+
+            padsz = child.sz - 8
+
+            if padsz > 2:
+                # Include two guard vars at the start and end
+                # The biggest goal for this script is to generate structs
+                # that work with "Add missing fields" inside IDA
+                # But, when I try and create a gap out of the pad vars,
+                # it completely destroys the structure itself and wrecks 
+                # any struct that happened to inherit from the struct
+                # which I tried to create a gap in.
+                #
+                # Including two guards prevents this from happening.
+                # For "Add missing fields inside IDA":
+                #   1. undefine the pad field inside the struct, to make
+                #      a gap
+                #   2. set offset delta to -8, because we are messing
+                #      with the members struct and not the actual class
+                #      struct (therefore does not include the vtable)
+                #   3. add missing fields will work
+
+                file.write("\tuint8_t __start_guard;\n")
+                file.write("\tuint8_t __pad{}[{}];\n".format(padname, padsz - 2))
+                file.write("\tuint8_t __end_guard;\n")
+            else:
+                file.write("\tuint8_t pad{}[{}];\n".format(padname, padsz))
+
             file.write("};\n\n")
 
             file.write("struct __cppobj {} {{\n".format(child.name))
             file.write("\t{}_vtbl *__vftable /*VFT*/;\n".format(child.name))
-            file.write("\t{}_mbrs __members;\n".format(child.name))
+            file.write("\t{}_mbrs m;\n".format(child.name))
             file.write("};\n\n")
         else:
             print("******Child {} has no parent???".format(child.name))
@@ -524,12 +538,21 @@ def generate_header_file(file, ihs):
             file.write("};\n\n")
 
             file.write("struct __cppobj {}_mbrs {{\n".format(ih.name))
-            file.write("\tuint8_t __pad0[{}];\n".format(ih.sz))
+
+            padsz = ih.sz - 8
+
+            if padsz > 2:
+                file.write("\tuint8_t __start_guard;\n")
+                file.write("\tuint8_t __pad0[{}];\n".format(padsz - 2))
+                file.write("\tuint8_t __end_guard;\n")
+            else:
+                file.write("\tuint8_t pad0[{}];\n".format(padsz))
+
             file.write("};\n\n")
 
             file.write("struct __cppobj {} {{\n".format(ih.name))
             file.write("\t{}_vtbl *__vftable /*VFT*/;\n".format(ih.name))
-            file.write("\t{}_mbrs __members;\n".format(ih.name))
+            file.write("\t{}_mbrs m;\n".format(ih.name))
             file.write("};\n\n")
 
         generate_structs_for_children(file, ih, 0)
@@ -930,38 +953,6 @@ def main():
 
         struct_file.write("\n")
 
-        # sym so I don't conflict with other structs in my current database
-        # change to 'vtable' when I make a new database
-        # struct_file.write("struct /*VFT*/ {}_vtbl {{\n".format(class_name))
-
-        # for field in struct_fields:
-            # print("Writing field {}".format(field))
-            # struct_file.write("\t{}\n".format(field))
-
-        # struct_file.write("};\n\n")
-        
-        # if "::" in class_name:
-        #     struct_file.write("struct {}::fields {{\n".format(class_name))
-        # else:
-        #     struct_file.write("struct {}_fields {{\n".format(class_name))
-
-        # struct_file.write("struct __cppobj {}_mbrs {{\n".format(class_name))
-
-        # struct_file.write("\tuint8_t pad[0x3000];\n")
-        # struct_file.write("};\n\n")
-
-        # struct_file.write("struct __cppobj {} {{\n".format(class_name))
-        # struct_file.write("\tstruct {}_vtbl *__vftable /*VFT*/;\n".format(class_name))
-        # struct_file.write("\tstruct {}_mbrs __members;\n".format(class_name))
-
-
-        # if "::" in class_name:
-        #     struct_file.write("\tstruct fields f;\n")
-        # else:
-        #     struct_file.write("\tstruct {}_fields f;\n".format(class_name))
-
-        # struct_file.write("};\n\n")
-
         # cnt += 1
 
         # if cnt == 5:
@@ -976,6 +967,5 @@ def main():
     generate_header_file(struct_file, ihs)
 
     struct_file.close()
-    # print("{} failed get_type's".format(num_failed_get_type))
 
 main()
