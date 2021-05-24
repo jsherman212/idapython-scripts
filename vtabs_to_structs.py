@@ -23,10 +23,13 @@ import ida_bytes
 import ida_kernwin
 import ida_name
 import ida_segment
+import ida_typeinf
 import idautils
 import idc
 import os
 import re
+
+til = None
 
 cs = None
 uc = None
@@ -69,9 +72,27 @@ def unicorn_init():
 c_keywords = ["volatile", "unsigned", "register", "struct", "static",
         "signed", "union", "const", "void", "enum", "auto"]
 primitive_types = ["bool", "char", "short", "int", "long", "float", "double"]
+stdint_types = ["int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t",
+        "uint32_t", "int64_t", "uint64_t", "int128_t", "uint128_t",
+        "intptr_t", "uintptr_t", "intmax_t", "uintmax_t", "int_fast8_t",
+        "int_fast16_t", "int_fast32_t", "int_fast64_t", "int_least8_t",
+        "uint_least16_t", "uint_least32_t", "uint_least64_t", "uint_fast8_t",
+        "uint_fast16_t", "uint_fast32_t", "uint_fast64_t", "uint_least8_t",
+        "uint_least16_t", "uint_least32_t", "uint_least64_t"]
+kernel_types = ["SInt8", "UInt8", "SInt16", "UInt16", "SInt32", "UInt32",
+        "SInt64", "UInt64", "task_t", "event_t"]
+ida_types = ["_BOOL1", "_BOOL2", "_BOOL4", "__int8", "__int16", "__int32",
+    "__int64", "__int128", "_BYTE", "_WORD", "_DWORD", "_QWORD", "_OWORD",
+    "_TBYTE", "_UNKNOWN"]
 
 def is_primitive_type(type_str):
     return type_str in primitive_types
+
+def is_stdint_type(type_str):
+    return type_str in stdint_types
+
+def is_ida_type(type_str):
+    return type_str in ida_types
 
 def get_raw_type(type_str):
     raw_type = type_str
@@ -131,7 +152,9 @@ def get_raw_type(type_str):
     return raw_type 
 
 def should_fwd_decl(raw_type_str):
-    return is_primitive_type(raw_type_str) == False and len(raw_type_str) > 0 and raw_type_str != "..."
+    global til
+
+    return is_primitive_type(raw_type_str) == False and is_stdint_type(raw_type_str) == False and is_ida_type(raw_type_str) == False and len(raw_type_str) > 0 and raw_type_str != "..." #and ida_typeinf.get_named_type64(til, raw_type_str, NTF_TYPE) == None
 
 def fix_type(type):
     # C++ templates
@@ -149,6 +172,8 @@ def get_arg_type_list(fxn_args):
 
     start = 0
     end = 0
+
+    # print("fxn_args: {}".format(fxn_args))
 
     for c in fxn_args:
         if c == '(':
@@ -431,7 +456,17 @@ def get_OSMetaClass_ctor_args(ea):
 
         superclass_name = superclass_name[0:superclass_name.find("::")]
 
-    return [ superclass_name, classname.decode(), params[2] ]
+    args = [ superclass_name, classname.decode(), params[2] ]
+
+    # if superclass_name == "AUAUnitDictionary":
+    #     for i in range(len(params)):
+    #         print("x{}: {}".format(i+1, hex(params[i])))
+
+    #     print(args)
+
+        # return
+
+    return args
 
 def write_spaces(amt):
     while amt > 0:
@@ -465,9 +500,24 @@ def dump_ih(ih, level):
         # desc_ih(child)
         # print()
         dump_ih(child, level + 1)
+        # print()
 
     # print(" [END({})]".format(ih.name))
     # print()
+
+def write_spaces_to_file(file, amt):
+    while amt > 0:
+        file.write(" ")
+        amt -= 1
+
+def dump_hierarchy_to_file(file, ih, level):
+    write_spaces_to_file(file, level*4)
+    file.write("{} ({} bytes)\n".format(ih.name, ih.sz))
+
+    for child in ih.children:
+        dump_hierarchy_to_file(file, child, level + 1)
+
+    return
 
 # We subtract 8 from the padding to account for the vtable (which is
 # not included in the member structure)
@@ -490,7 +540,26 @@ def generate_structs_for_children(file, ih, padname):
             file.write("struct __cppobj {}_mbrs : {}_mbrs {{\n".format(child.name,
                 child.parent.name))
 
-            padsz = child.sz - 8
+            # Child class size is child.sz - the sum of the parent class
+            # sizes - 8 (for the vtable)
+            # Child class size is (child.sz - 8) - (parent.sz - 8) (to exclude vtables)
+            # totsz = child.sz - 8
+            # p = child.parent
+
+            # while p != None:
+            #     totsz = totsz - p.sz
+            #     p = p.parent
+
+            # padsz = child.sz - 8
+            # padsz = totsz
+
+            padsz = (child.sz - 8) - (child.parent.sz - 8)
+
+            if padsz < 0:
+                print("Negative padsz:")
+                print("Parent: {} child: {}".format(child.parent.name, child.name))
+                print("Parent size: {} child size: {}".format(child.parent.sz, child.sz))
+                # dummy = ida_kernwin.ask_yn(0, "Halt")
 
             if padsz > 2:
                 # Include two guard vars at the start and end
@@ -513,8 +582,10 @@ def generate_structs_for_children(file, ih, padname):
                 file.write("\tuint8_t __start_guard;\n")
                 file.write("\tuint8_t __pad{}[{}];\n".format(padname, padsz - 2))
                 file.write("\tuint8_t __end_guard;\n")
+            elif padsz == 0:
+                file.write("\n")
             else:
-                file.write("\tuint8_t pad{}[{}];\n".format(padname, padsz))
+                file.write("\tuint8_t __pad{}[{}];\n".format(padname, padsz))
 
             file.write("};\n\n")
 
@@ -546,7 +617,7 @@ def generate_header_file(file, ihs):
                 file.write("\tuint8_t __pad0[{}];\n".format(padsz - 2))
                 file.write("\tuint8_t __end_guard;\n")
             else:
-                file.write("\tuint8_t pad0[{}];\n".format(padsz))
+                file.write("\tuint8_t __pad0[{}];\n".format(padsz))
 
             file.write("};\n\n")
 
@@ -555,9 +626,40 @@ def generate_header_file(file, ihs):
             file.write("\t{}_mbrs m;\n".format(ih.name))
             file.write("};\n\n")
 
-        generate_structs_for_children(file, ih, 0)
+        generate_structs_for_children(file, ih, 1)
+
+# Delete any forward decls that already exist inside IDA
+# All typedefs go first, so the moment we see a vtable we can be done
+def fixup_header_file(file):
+    newfile = open("{}/iOS/Scripts/structs_from_vtabs.h".format(str(Path.home())), "w")
+    done_fixing = False
+
+    for line in file:
+        line.strip()
+
+        if done_fixing:
+            newfile.write(line)
+            continue
+
+        if "vtbl" in line:
+            print("Done fixing up")
+            done_fixing = True
+            continue
+
+        # We are on a line that fwd decls, test to see if it
+        # already exists in IDA. If it does, we don't write
+        # that line to the new file
+        if "struct" in line:
+            type = line[line.find("__cppobj")+9:len(line)-1]
+
+
+    newfile.close()
 
 def main():
+    global til
+
+    til = ida_typeinf.get_idati()
+
     capstone_init()
     unicorn_init()
 
@@ -609,6 +711,10 @@ def main():
 
         csz = args[2]
 
+        # if pname == "AUAUnitDictionary" and cname == "AUAMixerUnitDictionary":
+        #     print(args)
+            # return
+
         new_parent = pname is not None and pname not in ih_dict
         new_child = cname not in ih_dict
 
@@ -617,6 +723,9 @@ def main():
 
         if new_child:
             ih_dict[cname] = InheritanceHierarchy(None, cname, csz)
+        else:
+            # Update class size for only child classes
+            ih_dict[cname].sz = csz
 
         if pname == None:
             # If this class has no superclass, it must be parent class,
@@ -628,6 +737,16 @@ def main():
             parent_ih.add_child(child_ih)
             child_ih.parent = parent_ih
             child_ih.totsz = child_ih.sz + parent_ih.totsz
+
+        # if cname == "AUAUnitDictionary":
+        #     print("AUAUnitDictionary sz: {}".format(ih_dict[pname].sz))
+        #     print(args)
+        #     return
+        # if cname == "AUAMixerUnitDictionary":
+        #     print("AUAMixerUnitDictionary sz: {}".format(ih_dict[cname].sz))
+        #     print(args)
+        #     return
+
 
         num += 1
         # if num == 10:
@@ -646,11 +765,15 @@ def main():
     print("Second pass: {} classes added to ihs list".format(num))
     num = 0
 
-    # for ih in ihs:
-    #     dump_ih(ih, 0)
-    #     num += 1
+    wants_class_hierarchy = ida_kernwin.ask_yn(0, "Dump class hierarchy?")
 
-    # return
+    if wants_class_hierarchy:
+        hierch_file = open("{}/iOS/Scripts/iokit_hier.txt".format(str(Path.home())), "w")
+        for ih in ihs:
+            dump_hierarchy_to_file(hierch_file, ih, 0)
+        print("File written to {}".format(hierch_file.name))
+        hierch_file.close()
+        return
 
     vtables = []
 
@@ -663,45 +786,94 @@ def main():
 
     struct_file = open("{}/iOS/Scripts/structs_from_vtabs.h".format(str(Path.home())), "w")
 
-    # First, get some common objects in there
-    # struct_file.write(
-    #         "struct __cppobj ExpansionData {};\n\n"
-    #         "struct __cppobj OSMetaClassBase_vtbl;\n\n"
-    #         "struct __cppobj OSMetaClassBase_mbrs {};\n\n"
-    #         "struct __cppobj OSMetaClassBase {\n"
-    #         "\tOSMetaClassBase_vtbl *__vftable /*VFT*/;\n"
-    #         "\tOSMetaClassBase_mbrs __members;\n"
-    #         "};\n\n"
-    #         "struct __cppobj OSObject_mbrs : OSMetaClassBase_mbrs {\n"
-    #         "\tint retainCount;\n"
-    #         "};\n\n"
-    #         "struct __cppobj OSObject_vtbl : OSMetaClassBase_vtbl {};\n\n"
-    #         "struct __cppobj OSObject {\n"
-    #         "\tOSObject_vtbl *__vftable;\n"
-    #         "\tOSObject_mbrs __members;\n"
-    #         "};\n\n"
-    #         "struct __cppobj OSMetaClass_mbrs : OSMetaClassBase_mbrs {\n"
-    #         "\tExpansionData *reserved;\n"
-    #         "\tconst OSMetaClass *superClassLink;\n"
-    #         "\tconst OSSymbol *className;\n"
-    #         "\tunsigned int classSize;\n"
-    #         "\tunsigned int instanceCount;\n"
-    #         "};\n\n"
-    #         "struct __cppobj OSMetaClass {\n"
-    #         "\tOSMetaClassBase_vtbl *__vftable;\n"
-    #         "\tOSMetaClass_mbrs __members;\n"
-    #         "};\n\n"
-    #         "struct __cppobj OSString_mbrs : OSObject_mbrs {\n"
-    #         "\tunsigned __int32 flags : 14;\n"
-    #         "\tunsigned __int32 length : 18;\n"
-    #         "\tchar *string;\n"
-    #         "};\n\n"
-    #         "struct __cppobj OSString {\n"
-    #         "\tOSObject_vtbl *__vftable;\n"
-    #         "\tOSString_mbrs __members;\n"
-    #         "};\n\n"
-    #         "struct __cppobj OSSymbol : OSString {};\n\n"
-    #         )
+    is_standalone_kext = ida_kernwin.ask_yn(0, "Standalone kext?")
+
+    if is_standalone_kext:
+        # If this is from a standalone kext, I need to write some
+        # definitions for common objects that follow my struct format,
+        # otherwise, things get really screwed
+        struct_file.write(
+                "struct __cppobj ExpansionData {};\n\n"
+                "struct __cppobj OSMetaClassBase_vtbl;\n\n"
+                "struct __cppobj OSMetaClassBase_mbrs {};\n\n"
+                "struct __cppobj OSMetaClassBase {\n"
+                "\tOSMetaClassBase_vtbl *__vftable /*VFT*/;\n"
+                "\tOSMetaClassBase_mbrs m;\n"
+                "};\n\n"
+                "struct __cppobj OSObject_mbrs : OSMetaClassBase_mbrs {\n"
+                "\tint retainCount;\n"
+                "};\n\n"
+                "struct __cppobj OSObject_vtbl : OSMetaClassBase_vtbl {};\n\n"
+                "struct __cppobj OSObject {\n"
+                "\tOSObject_vtbl *__vftable;\n"
+                "\tOSObject_mbrs m;\n"
+                "};\n\n"
+                "struct __cppobj OSMetaClass_mbrs : OSMetaClassBase_mbrs {\n"
+                "\tExpansionData *reserved;\n"
+                "\tconst OSMetaClass *superClassLink;\n"
+                "\tconst OSSymbol *className;\n"
+                "\tunsigned int classSize;\n"
+                "\tunsigned int instanceCount;\n"
+                "};\n\n"
+                "struct __cppobj OSMetaClass {\n"
+                "\tOSMetaClassBase_vtbl *__vftable;\n"
+                "\tOSMetaClass_mbrs m;\n"
+                "};\n\n"
+                "struct __cppobj OSCollection_vtbl;\n"
+                "struct __cppobj OSCollection_mbrs : OSObject_mbrs {\n"
+                "\tunsigned int updateStamp;\n"
+                "\tunsigned int fOptions;\n"
+                "};\n\n"
+                "struct __cppobj OSCollection {\n"
+                "\tOSCollection_vtbl *__vftable;\n"
+                "\tOSCollection_mbrs m;\n"
+                "};\n\n"
+                "struct __cppobj OSArray_vtbl;\n"
+                "struct __cppobj OSArray_mbrs : OSCollection_mbrs {\n"
+                "\tunsigned int count;\n"
+                "\tunsigned int capacity;\n"
+                "\tunsigned int capacityIncrement;\n"
+                "\tvoid *array;\n"
+                "};\n\n"
+                "struct __cppobj OSArray {\n"
+                "\tOSArray_vtbl *__vftable;\n"
+                "\tOSArray_mbrs m;\n"
+                "};\n\n"
+                "struct __cppobj OSDictionary::dictEntry {\n"
+                "\tconst OSSymbol *key;\n"
+                "\tconst OSMetaClassBase *value;\n"
+                "};\n\n"
+                "struct __cppobj OSDictionary_vtbl;\n"
+                "struct __cppobj OSDictionary_mbrs : OSCollection_mbrs {\n"
+                "\tunsigned int count;\n"
+                "\tunsigned int capacity;\n"
+                "\tunsigned int capacityIncrement;\n"
+                "\tOSDictionary::dictEntry *dict;\n"
+                "};\n\n"
+                "struct __cppobj OSDictionary {\n"
+                "\tOSDictionary_vtbl *__vftable;\n"
+                "\tOSDictionary_mbrs m;\n"
+                "};\n\n"
+                "struct __cppobj OSSet_vtbl;\n"
+                "struct __cppobj OSSet_mbrs : OSCollection_mbrs {\n"
+                "\tOSArray *members;\n"
+                "};\n\n"
+                "struct __cppobj OSSet {\n"
+                "\tOSSet_vtbl *__vftable;\n"
+                "\tOSSet_mbrs m;\n"
+                "};\n\n"
+                "struct __cppobj OSString_mbrs : OSObject_mbrs {\n"
+                "\tunsigned __int32 flags : 14;\n"
+                "\tunsigned __int32 length : 18;\n"
+                "\tchar *string;\n"
+                "};\n\n"
+                "struct __cppobj OSString {\n"
+                "\tOSObject_vtbl *__vftable;\n"
+                "\tOSString_mbrs m;\n"
+                "};\n\n"
+                "struct __cppobj OSSymbol : OSString {};\n\n"
+                )
+    
 
     num_failed_get_type = 0
     cnt = 0
@@ -759,6 +931,8 @@ def main():
         #     continue
         # if class_name != "AppleConvergedIPCICEBBBTIInterface":
         #     continue
+        # if class_name != "ApplePPM":
+        #     continue
 
 
         cnt += 1
@@ -800,7 +974,6 @@ def main():
             #     num_failed_get_type += 1
             #     ea += 8
             #     continue
-            
 
             # default to this for ___cxa_pure_virtual
             fxn_args = "void"
@@ -849,7 +1022,6 @@ def main():
 
                         # extra comma makes the parser happy
                         fxn_args_types_list = get_arg_type_list(fxn_args_string + ",")
-
                         
                         # print("More than one arg for {}: {}".format(fxn_name, fxn_args_types_list))
                         # print()
@@ -894,6 +1066,12 @@ def main():
                     # convention specifed
                     if all_except_args.find(" ") == -1:
                         fxn_return_type = all_except_args
+                        
+                        # Also, this having no spaces could mean IDA messed
+                        # up, so we should use the demangled name instead
+                        # and parse that
+                        fxn_type = "(" + fxn_name[fxn_name.find("(")+1:]
+                        # print("No spaces in args, using {} as fxn_type".format(fxn_type))
                     else:           
                         double_underscore = all_except_args.rfind("__")
 
@@ -904,7 +1082,48 @@ def main():
                             fxn_return_type = all_except_args
 
                     # get args
+                    # print("fxn_type: {}".format(fxn_type))
                     fxn_args = fxn_type[fxn_type.find("(")+1:fxn_type.rfind(")")]
+                    fxn_args_type_list = get_arg_type_list(fxn_args + ",")
+                    fixed_fxn_args_type_list = []
+
+                    # Fix up args
+                    for arg_type in fxn_args_type_list:
+                        # Remove __hidden
+                        arg_type = arg_type.replace("__hidden", "")
+
+                        # Check for a pointer. This is an easy case, we
+                        # just delete everything from the first *
+                        star = arg_type.find("*")
+                        
+                        if star != -1:
+                            arg_type = arg_type[0:star]
+                        else:
+                            # Otherwise, find the last space, and delete
+                            # from there
+                            # But in case there was no name for this
+                            # parameter, check if the token after the last
+                            # space is not an IDA type or primitive type
+                            lspace = arg_type.rfind(" ")
+
+                            if lspace != -1:
+                                token = arg_type[lspace:].replace(" ", "")
+
+                                if not is_primitive_type(token) and not is_ida_type(token):
+                                    arg_type = arg_type[0:lspace]
+
+                        # print("arg_type: {}".format(arg_type))
+                        
+                        fixed_fxn_args_type_list.append(arg_type)
+
+                    # to_fwd_decl = get_fwd_decls(fxn_args_type_list)
+                    to_fwd_decl = get_fwd_decls(fixed_fxn_args_type_list)
+
+                    if len(to_fwd_decl) > 0:
+                        fwd_decls.update(to_fwd_decl)
+
+                    # print("fxn_type is not None for {}: fxn args: {}".format(fxn_name, fxn_args_type_list))
+                    # print("fxn_type is not None: will fwd declare: {}".format(to_fwd_decl))
 
                 # get function name
                 # remove 'classname::' and params
@@ -942,6 +1161,7 @@ def main():
 
             ea += 8
 
+        # return
         # Some classes won't have xrefs to OSMetaClass::OSMetaClass,
         # like OSMetaClassBase
         if class_name in ih_dict:
@@ -965,6 +1185,7 @@ def main():
     #     dump_ih(ih, 0)
 
     generate_header_file(struct_file, ihs)
+    # fixup_header_file(struct_file)
 
     struct_file.close()
 
